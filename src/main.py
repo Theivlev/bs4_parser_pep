@@ -1,5 +1,6 @@
 import logging
 import re
+from collections import defaultdict
 from urllib.parse import urljoin
 
 import requests_cache
@@ -7,12 +8,8 @@ from bs4 import BeautifulSoup
 from tqdm import tqdm
 
 from configs import configure_argument_parser, configure_logging
-from constants import (
-    BASE_DIR,
-    MAIN_DOC_URL,
-    MAIN_PEP_VERSION_URL,
-    EXPECTED_STATUS
-    )
+from constants import (BASE_DIR, EXPECTED_STATUS, MAIN_DOC_URL,
+                       MAIN_PEP_VERSION_URL)
 from outputs import control_output
 from utils import find_tag, get_response
 
@@ -32,7 +29,7 @@ def whats_new(session):
 
     results = [('Ссылка на статью', 'Заголовок', 'Редактор, Автор')]
     for section in tqdm(sections_by_python):
-        version_a_tag = section.find('a')
+        version_a_tag = find_tag(section, 'a')
         href = version_a_tag['href']
         version_link = urljoin(whats_new_url, href)
         response = get_response(session, version_link)
@@ -60,8 +57,8 @@ def latest_versions(session):
         if 'All versions' in ul.text:
             a_tags = ul.find_all('a')
             break
-        else:
-            raise Exception('Ничего не нашлось')
+    else:
+        raise Exception('Ничего не нашлось')
 
     results = [('Ссылка на документацию', 'Версия', 'Статус')]
     pattern = r'Python (?P<version>\d\.\d+) \((?P<status>.*)\)'
@@ -99,6 +96,8 @@ def download(session):
     downloads_dir.mkdir(exist_ok=True)
     archive_path = downloads_dir / filename
     response = session.get(archive_url)
+    if response is None:
+        return
     with open(archive_path, 'wb') as file:
         file.write(response.content)
     logging.info(f'Архив был загружен и сохранён: {archive_path}')
@@ -106,14 +105,16 @@ def download(session):
 
 def pep(session):
     response = get_response(session, MAIN_PEP_VERSION_URL)
+    if response is None:
+        return
     soup = BeautifulSoup(response.text, features='lxml')
     section_tags = find_tag(soup, 'section', {'id': 'numerical-index'})
     tbody_tags = find_tag(section_tags, 'tbody')
     tr_tags = tbody_tags.find_all('tr')
 
+    error_messages = []
     results = [('Статус', 'Количество')]
-    status_count = {}
-    peps_count = 0
+    status_count = defaultdict(int)
 
     for tr_tag in tqdm(tr_tags):
         td_tag = find_tag(tr_tag, 'td')
@@ -123,26 +124,29 @@ def pep(session):
         link = urljoin(MAIN_PEP_VERSION_URL, href)
 
         response = get_response(session, link)
+        if response is None:
+            continue
         soup = BeautifulSoup(response.text, 'lxml')
-        dt_tags = soup.find_all('dt')
+        dl_tag = find_tag(soup, 'dl')
+        status = dl_tag.find(string='Status')
+        status = status.find_parent()
+        status_value = status.next_sibling.next_sibling.string
+        status_count[status_value] += 1
+        if status_value not in EXPECTED_STATUS[list_status]:
+            error_message = (
+                'Несовпадающие статусы:\n'
+                f'{link}\n'
+                f'Статус в картрочке {status_value}\n'
+                f'Ожидаемые статусы: {EXPECTED_STATUS[list_status]}')
+            error_messages.append(error_message)
 
-        for dt_tag in dt_tags:
-            if dt_tag.text == 'Status:':
-                status_value = dt_tag.find_next_sibling("dd").text
-                if status_value not in status_count:
-                    status_count[status_value] = 1
-                if status_value in status_count:
-                    status_count[status_value] += 1
-                if status_value not in EXPECTED_STATUS[list_status]:
-                    error_massage = (
-                        'Несовпадающие статусы:\n'
-                        f'{link}\n'
-                        f'Статус в картрочке {status_value}\n'
-                        f'Ожидаемые статусы: {EXPECTED_STATUS[list_status]}')
-                    logging.warning(error_massage)
-    for status in status_count:
-        results.append((status, status_count[status]))
-    results.append(('Total', peps_count))
+    if error_messages:
+        error_log = '\n'.join(error_messages)
+        logging.warning(error_log)
+
+    total = sum([int(value) for value in status_count.values()])
+    results.extend((status, status_count[status]) for status in status_count)
+    results.append(('Total', total))
 
     return results
 
