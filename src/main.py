@@ -144,8 +144,8 @@ def pep(session):
         error_log = '\n'.join(error_messages)
         logging.warning(error_log)
 
-    total = sum([int(value) for value in status_count.values()])
-    results.extend((status, status_count[status]) for status in status_count)
+    total = sum(status_count.values())
+    results.extend(status_count.items())
     results.append(('Total', total))
 
     return results
